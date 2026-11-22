@@ -22,9 +22,12 @@ jobs:
           mkdir -p _app
           cd _app
           flutter create --platforms=android --org com.posbon --project-name posbon_parent .
+          sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' android/app/src/main/AndroidManifest.xml
           rm -rf lib
           cp -r ../lib lib
           cp ../pubspec.yaml pubspec.yaml
+          mkdir -p ~/.android
+          cp ../ci/debug.keystore ~/.android/debug.keystore
           flutter pub get
           flutter build apk --release
 
