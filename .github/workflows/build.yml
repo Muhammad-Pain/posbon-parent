@@ -17,22 +17,42 @@ jobs:
         with:
           channel: stable
 
-      - name: Сохтани APK
+      - name: Сохтани APK-ҳо
         run: |
-          mkdir -p _app
-          cd _app
-          flutter create --platforms=android --org com.posbon --project-name posbon_parent .
-          sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' android/app/src/main/AndroidManifest.xml
-          rm -rf lib
-          cp -r ../lib lib
-          cp ../pubspec.yaml pubspec.yaml
+          set -e
+          ROOT="$GITHUB_WORKSPACE"
           mkdir -p ~/.android
-          cp ../ci/debug.keystore ~/.android/debug.keystore
-          flutter pub get
-          flutter build apk --release
+          cp "$ROOT/ci/debug.keystore" ~/.android/debug.keystore
 
-      - name: Боркунии APK
+          build_app () {
+            SRC="$1"; PROJ="$2"; LABEL="$3"; LOC="$4"
+            rm -rf "/tmp/$PROJ"
+            flutter create --platforms=android --org com.posbon --project-name "$PROJ" "/tmp/$PROJ"
+            M="/tmp/$PROJ/android/app/src/main/AndroidManifest.xml"
+            sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$M"
+            if [ "$LOC" = "yes" ]; then
+              sed -i 's|<application|<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>\n    <application|' "$M"
+            fi
+            sed -i "s|android:label=\"[^\"]*\"|android:label=\"$LABEL\"|" "$M"
+            rm -rf "/tmp/$PROJ/lib" "/tmp/$PROJ/test"
+            mkdir -p "/tmp/$PROJ/lib"
+            cp "$ROOT/$SRC" "/tmp/$PROJ/lib/main.dart"
+            cp "$ROOT/pubspec.yaml" "/tmp/$PROJ/pubspec.yaml"
+            ( cd "/tmp/$PROJ" && flutter pub get && flutter build apk --release )
+            cp "/tmp/$PROJ/build/app/outputs/flutter-apk/app-release.apk" "$ROOT/$PROJ.apk"
+          }
+
+          build_app parent/main.dart posbon_parent "Посбон" no
+          build_app child/main.dart posbon_child "Посбон Кӯдак" yes
+
+      - name: APK-и волидайн
         uses: actions/upload-artifact@v4
         with:
           name: posbon-parent-apk
-          path: _app/build/app/outputs/flutter-apk/app-release.apk
+          path: posbon_parent.apk
+
+      - name: APK-и кӯдак
+        uses: actions/upload-artifact@v4
+        with:
+          name: posbon-child-apk
+          path: posbon_child.apk
