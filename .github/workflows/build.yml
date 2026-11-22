@@ -1,0 +1,35 @@
+name: Сохтани APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Гирифтани код
+        uses: actions/checkout@v4
+
+      - name: Насби Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Сохтани APK
+        run: |
+          mkdir -p _app
+          cd _app
+          flutter create --platforms=android --org com.posbon --project-name posbon_parent .
+          rm -rf lib
+          cp -r ../lib lib
+          cp ../pubspec.yaml pubspec.yaml
+          flutter pub get
+          flutter build apk --release
+
+      - name: Боркунии APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: posbon-parent-apk
+          path: _app/build/app/outputs/flutter-apk/app-release.apk
