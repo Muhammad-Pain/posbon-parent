@@ -8,6 +8,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:battery_plus/battery_plus.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 const String supabaseUrl = 'https://dfffubhyobxiknwacvzg.supabase.co';
 const String supabaseAnonKey =
@@ -19,13 +21,103 @@ const deep = Color(0xFF052019);
 const bg = Color(0xFFF2F5F1);
 const ink = Color(0xFF12201B);
 
+const String kChannelId = 'posbon_service';
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
+  await _initBackgroundService();
   runApp(const ChildApp());
 }
 
 final supabase = Supabase.instance.client;
+
+// ── Хидмати фонӣ ──
+Future<void> _initBackgroundService() async {
+  try {
+    const channel = AndroidNotificationChannel(
+      kChannelId,
+      'Посбон',
+      description: 'Назорати волидайн фаъол аст',
+      importance: Importance.low,
+    );
+    final fln = FlutterLocalNotificationsPlugin();
+    await fln
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+        ?.createNotificationChannel(channel);
+
+    final service = FlutterBackgroundService();
+    await service.configure(
+      androidConfiguration: AndroidConfiguration(
+        onStart: onServiceStart,
+        autoStart: false,
+        isForegroundMode: true,
+        notificationChannelId: kChannelId,
+        initialNotificationTitle: 'Посбон фаъол',
+        initialNotificationContent: 'Назорати волидайн фаъол аст',
+        foregroundServiceNotificationId: 8421,
+        foregroundServiceTypes: [AndroidForegroundType.location],
+      ),
+      iosConfiguration: IosConfiguration(
+        autoStart: false,
+        onForeground: onServiceStart,
+        onBackground: _iosBg,
+      ),
+    );
+  } catch (_) {}
+}
+
+@pragma('vm:entry-point')
+Future<bool> _iosBg(ServiceInstance service) async => true;
+
+@pragma('vm:entry-point')
+void onServiceStart(ServiceInstance service) async {
+  DartPluginRegistrant.ensureInitialized();
+  try {
+    await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
+  } catch (_) {}
+  final sb = Supabase.instance.client;
+  final battery = Battery();
+
+  Future<void> report() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('device_token');
+      if (token == null) return;
+      try {
+        final pos = await Geolocator.getCurrentPosition(
+            desiredAccuracy: LocationAccuracy.medium);
+        await sb.rpc('device_report_location', params: {
+          'p_token': token,
+          'p_lat': pos.latitude,
+          'p_lng': pos.longitude,
+          'p_accuracy': pos.accuracy,
+        });
+      } catch (_) {}
+      try {
+        final lvl = await battery.batteryLevel;
+        await sb.rpc('device_heartbeat', params: {
+          'p_token': token,
+          'p_battery': lvl,
+          'p_status': 'online'
+        });
+      } catch (_) {}
+    } catch (_) {}
+  }
+
+  report();
+  Timer.periodic(const Duration(minutes: 1), (_) => report());
+}
+
+Future<void> startMonitoring() async {
+  try {
+    final service = FlutterBackgroundService();
+    if (!await service.isRunning()) {
+      await service.startService();
+    }
+  } catch (_) {}
+}
 
 class ChildApp extends StatelessWidget {
   const ChildApp({super.key});
@@ -91,7 +183,6 @@ class _ChildGateState extends State<ChildGate> {
   }
 }
 
-// Логотип
 class BrandLogo extends StatelessWidget {
   final double size;
   final bool glow;
@@ -285,7 +376,7 @@ class _PairScreenState extends State<PairScreen> {
   }
 }
 
-// ── Экрани муҳофизатшуда (ошкоро) ──
+// ── Экрани муҳофизатшуда ──
 class ProtectedScreen extends StatefulWidget {
   final String token;
   final String childName;
@@ -300,15 +391,15 @@ class _ProtectedScreenState extends State<ProtectedScreen>
   final _battery = Battery();
   Timer? _timer;
   int? _level;
-  bool _locationOn = false;
+  LocationPermission _perm = LocationPermission.denied;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _setup();
     _tick();
     _timer = Timer.periodic(const Duration(seconds: 30), (_) => _tick());
-    _reportLocation();
   }
 
   @override
@@ -316,6 +407,44 @@ class _ProtectedScreenState extends State<ProtectedScreen>
     _timer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _checkPerm();
+  }
+
+  Future<void> _setup() async {
+    await _ensurePermission();
+    await startMonitoring();
+    _reportNow();
+  }
+
+  Future<void> _checkPerm() async {
+    final p = await Geolocator.checkPermission();
+    if (mounted) setState(() => _perm = p);
+  }
+
+  Future<void> _ensurePermission() async {
+    LocationPermission p = await Geolocator.checkPermission();
+    if (p == LocationPermission.denied) {
+      p = await Geolocator.requestPermission();
+    }
+    if (mounted) setState(() => _perm = p);
+  }
+
+  Future<void> _reportNow() async {
+    try {
+      if (_perm == LocationPermission.denied ||
+          _perm == LocationPermission.deniedForever) return;
+      final pos = await Geolocator.getCurrentPosition();
+      await supabase.rpc('device_report_location', params: {
+        'p_token': widget.token,
+        'p_lat': pos.latitude,
+        'p_lng': pos.longitude,
+        'p_accuracy': pos.accuracy,
+      });
+    } catch (_) {}
   }
 
   Future<void> _tick() async {
@@ -330,28 +459,6 @@ class _ProtectedScreenState extends State<ProtectedScreen>
     } catch (_) {}
   }
 
-  Future<void> _reportLocation() async {
-    try {
-      LocationPermission perm = await Geolocator.checkPermission();
-      if (perm == LocationPermission.denied) {
-        perm = await Geolocator.requestPermission();
-      }
-      if (perm == LocationPermission.denied ||
-          perm == LocationPermission.deniedForever) {
-        if (mounted) setState(() => _locationOn = false);
-        return;
-      }
-      if (mounted) setState(() => _locationOn = true);
-      final pos = await Geolocator.getCurrentPosition();
-      await supabase.rpc('device_report_location', params: {
-        'p_token': widget.token,
-        'p_lat': pos.latitude,
-        'p_lng': pos.longitude,
-        'p_accuracy': pos.accuracy,
-      });
-    } catch (_) {}
-  }
-
   Future<void> _sos() async {
     try {
       await supabase.rpc('device_log_event', params: {
@@ -361,7 +468,7 @@ class _ProtectedScreenState extends State<ProtectedScreen>
         'p_detail': 'Кӯдак тугмаи SOS-ро пахш кард',
         'p_severity': 'high',
       });
-      await _reportLocation();
+      await _reportNow();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
             content: Text('Ба волидайн хабар фиристода шуд'),
@@ -389,14 +496,14 @@ class _ProtectedScreenState extends State<ProtectedScreen>
                 ],
               ),
             ),
-            const Icon(Icons.check_circle_rounded,
-                color: brand, size: 20),
+            const Icon(Icons.check_circle_rounded, color: brand, size: 20),
           ],
         ),
       );
 
   @override
   Widget build(BuildContext context) {
+    final needAlways = _perm != LocationPermission.always;
     return Scaffold(
       body: SafeArea(
         child: SingleChildScrollView(
@@ -465,6 +572,32 @@ class _ProtectedScreenState extends State<ProtectedScreen>
                   ],
                 ),
               ),
+              if (needAlways) ...[
+                const SizedBox(height: 14),
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                      color: const Color(0xFFFDF1E3),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: const Color(0xFFF3D3AE))),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.info_outline_rounded,
+                          color: Color(0xFF9A4A0B)),
+                      const SizedBox(width: 10),
+                      const Expanded(
+                        child: Text(
+                            'Барои назорати доимӣ, иҷозати ҷойро ба «Ҳамеша» (Allow all the time) гузоред.',
+                            style: TextStyle(
+                                fontSize: 12.5, color: Color(0xFF6B4A1E))),
+                      ),
+                      TextButton(
+                          onPressed: () => Geolocator.openAppSettings(),
+                          child: const Text('Танзим')),
+                    ],
+                  ),
+                ),
+              ],
               const SizedBox(height: 18),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 18),
@@ -480,10 +613,10 @@ class _ProtectedScreenState extends State<ProtectedScreen>
                             fontSize: 15, fontWeight: FontWeight.w700)),
                     const SizedBox(height: 4),
                     _row(Icons.location_on_outlined, 'Ҷойгиршавӣ',
-                        _locationOn ? 'Фаъол' : 'Иҷозати ҷой лозим аст'),
+                        'Фаъол (ҳатто дар фон)'),
                     const Divider(height: 1),
-                    _row(Icons.bar_chart_rounded, 'Вақти экран',
-                        'Барномаҳо ва вақт'),
+                    _row(Icons.battery_charging_full_rounded, 'Батарея',
+                        'Сатҳи заряд'),
                     const Divider(height: 1),
                     _row(Icons.notifications_none_rounded,
                         'Ҳушдорҳои бехатарӣ', 'Ҳолатҳои хатарнок'),
@@ -498,8 +631,8 @@ class _ProtectedScreenState extends State<ProtectedScreen>
                   onPressed: _sos,
                   icon: const Icon(Icons.warning_amber_rounded, size: 26),
                   label: const Text('SOS — ба волидайн хабар диҳед',
-                      style: TextStyle(
-                          fontSize: 16, fontWeight: FontWeight.w700)),
+                      style:
+                          TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
                   style: FilledButton.styleFrom(
                       backgroundColor: const Color(0xFFB4281C),
                       shape: RoundedRectangleBorder(
@@ -509,8 +642,7 @@ class _ProtectedScreenState extends State<ProtectedScreen>
               const SizedBox(height: 10),
               const Center(
                 child: Text('Посбон фаъол аст',
-                    style: TextStyle(
-                        color: Color(0xFF8495A0), fontSize: 12)),
+                    style: TextStyle(color: Color(0xFF8495A0), fontSize: 12)),
               ),
             ],
           ),
