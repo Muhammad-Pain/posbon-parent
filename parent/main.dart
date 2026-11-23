@@ -1,7 +1,10 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
 
 // ── Пайвасти Supabase (проекти "posbon") — калидҳои оммавӣ ──
 const String supabaseUrl = 'https://dfffubhyobxiknwacvzg.supabase.co';
@@ -13,6 +16,7 @@ const brandDark = Color(0xFF0A5C45);
 const deep = Color(0xFF052019);
 const bg = Color(0xFFF2F5F1);
 const ink = Color(0xFF12201B);
+const danger = Color(0xFFB4281C);
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -22,15 +26,34 @@ Future<void> main() async {
 
 final supabase = Supabase.instance.client;
 
+bool deviceOnline(Map? d) {
+  if (d == null) return false;
+  final ls = d['last_seen'];
+  if (ls == null) return false;
+  final t = DateTime.tryParse(ls.toString());
+  if (t == null) return false;
+  return DateTime.now().toUtc().difference(t.toUtc()).inMinutes < 3;
+}
+
+String agoText(String? iso) {
+  if (iso == null) return '—';
+  final t = DateTime.tryParse(iso);
+  if (t == null) return '—';
+  final diff = DateTime.now().toUtc().difference(t.toUtc());
+  if (diff.inMinutes < 1) return 'ҳозир';
+  if (diff.inMinutes < 60) return '${diff.inMinutes} дақиқа пеш';
+  if (diff.inHours < 24) return '${diff.inHours} соат пеш';
+  return '${diff.inDays} рӯз пеш';
+}
+
 class PosbonApp extends StatelessWidget {
   const PosbonApp({super.key});
   @override
   Widget build(BuildContext context) {
     final base = ThemeData(
-      useMaterial3: true,
-      colorSchemeSeed: brand,
-      scaffoldBackgroundColor: bg,
-    );
+        useMaterial3: true,
+        colorSchemeSeed: brand,
+        scaffoldBackgroundColor: bg);
     return MaterialApp(
       title: 'Посбон',
       debugShowCheckedModeBanner: false,
@@ -58,7 +81,6 @@ class AuthGate extends StatelessWidget {
   }
 }
 
-// ── Логотипи бренд ──
 class BrandLogo extends StatelessWidget {
   final double size;
   final bool glow;
@@ -83,19 +105,16 @@ class BrandLogo extends StatelessWidget {
               ]
             : null,
       ),
-      child: Icon(Icons.shield_rounded,
-          color: Colors.white, size: size * 0.52),
+      child:
+          Icon(Icons.shield_rounded, color: Colors.white, size: size * 0.52),
     );
   }
 }
 
-// Нақшу нигори нуқтагӣ (мисли палангаки барфӣ) дар сарлавҳа
 class _SpotsPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
-    final p = Paint()
-      ..color = Colors.white.withOpacity(0.06)
-      ..style = PaintingStyle.fill;
+    final p = Paint()..color = Colors.white.withOpacity(0.06);
     final ps = Paint()
       ..color = Colors.white.withOpacity(0.07)
       ..style = PaintingStyle.stroke
@@ -245,7 +264,7 @@ class _AuthScreenState extends State<AuthScreen> {
                               padding: const EdgeInsets.only(top: 12),
                               child: Text(_error!,
                                   style: const TextStyle(
-                                      color: Color(0xFFB4281C), fontSize: 13)),
+                                      color: danger, fontSize: 13)),
                             ),
                           if (_info != null)
                             Padding(
@@ -262,7 +281,8 @@ class _AuthScreenState extends State<AuthScreen> {
                               style: FilledButton.styleFrom(
                                   backgroundColor: brand,
                                   shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(16))),
+                                      borderRadius:
+                                          BorderRadius.circular(16))),
                               child: _loading
                                   ? const SizedBox(
                                       height: 22,
@@ -320,6 +340,7 @@ class _HomeScreenState extends State<HomeScreen> {
   List<Map<String, dynamic>> _children = [];
   bool _loading = true;
   String? _error;
+  Timer? _timer;
 
   final _palette = const [
     Color(0xFF0E7A5C),
@@ -333,13 +354,17 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _load();
+    _timer = Timer.periodic(const Duration(seconds: 20), (_) => _load(silent: true));
   }
 
-  Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _load({bool silent = false}) async {
+    if (!silent) setState(() { _loading = true; _error = null; });
     try {
       final uid = supabase.auth.currentUser!.id;
       var family = await supabase
@@ -353,19 +378,37 @@ class _HomeScreenState extends State<HomeScreen> {
           .select('id')
           .single();
       final familyId = family['id'] as String;
-      final children = await supabase
+      final children = List<Map<String, dynamic>>.from(await supabase
           .from('children')
           .select()
           .eq('family_id', familyId)
-          .order('created_at');
+          .order('created_at'));
+      final ids = children.map((c) => c['id'] as String).toList();
+      final Map<String, dynamic> devByChild = {};
+      if (ids.isNotEmpty) {
+        final devices = await supabase
+            .from('devices')
+            .select()
+            .inFilter('child_id', ids)
+            .order('created_at', ascending: false);
+        for (final d in devices) {
+          final cid = d['child_id'] as String;
+          devByChild.putIfAbsent(cid, () => d);
+        }
+      }
+      for (final c in children) {
+        c['_device'] = devByChild[c['id']];
+      }
+      if (!mounted) return;
       setState(() {
         _familyId = familyId;
-        _children = List<Map<String, dynamic>>.from(children);
+        _children = children;
         _loading = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
-        _error = 'Хатои боргирӣ. Интернетро санҷед.';
+        if (!silent) _error = 'Хатои боргирӣ. Интернетро санҷед.';
         _loading = false;
       });
     }
@@ -409,68 +452,6 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
     );
-  }
-
-  Future<void> _pair(String childId, String childName) async {
-    try {
-      final code = await supabase
-          .rpc('app_create_pairing_code', params: {'p_child_id': childId});
-      if (!mounted) return;
-      showDialog(
-        context: context,
-        builder: (ctx) => Dialog(
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const BrandLogo(size: 58, glow: false),
-                const SizedBox(height: 14),
-                Text('Рамз барои $childName',
-                    style: GoogleFonts.manrope(
-                        fontSize: 16, fontWeight: FontWeight.w700)),
-                const SizedBox(height: 16),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-                  decoration: BoxDecoration(
-                      color: const Color(0xFFEAF4EF),
-                      borderRadius: BorderRadius.circular(16)),
-                  child: Text('$code',
-                      style: GoogleFonts.robotoMono(
-                          fontSize: 38,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 10,
-                          color: brandDark)),
-                ),
-                const SizedBox(height: 14),
-                const Text(
-                    'Дар телефони кӯдак, дар барномаи «Посбон Кӯдак» ин рамзро ворид кунед. Эътибор то 10 дақиқа.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 13, height: 1.4)),
-                const SizedBox(height: 18),
-                SizedBox(
-                  width: double.infinity,
-                  height: 48,
-                  child: FilledButton(
-                    style: FilledButton.styleFrom(
-                        backgroundColor: brand,
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14))),
-                    onPressed: () => Navigator.pop(ctx),
-                    child: const Text('Хуб'),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
-    } catch (e) {
-      _snack('Хато ҳангоми сохтани рамз');
-    }
   }
 
   void _snack(String m) => ScaffoldMessenger.of(context)
@@ -517,8 +498,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                   IconButton(
                     onPressed: () => supabase.auth.signOut(),
-                    icon: const Icon(Icons.logout_rounded,
-                        color: Colors.white),
+                    icon:
+                        const Icon(Icons.logout_rounded, color: Colors.white),
                   ),
                 ],
               ),
@@ -538,75 +519,109 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _childCard(Map<String, dynamic> c, int i) {
     final name = c['name'] as String;
     final color = _palette[i % _palette.length];
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-              color: Colors.black.withOpacity(0.05),
-              blurRadius: 16,
-              offset: const Offset(0, 6))
-        ],
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 52,
-            height: 52,
+    final device = c['_device'] as Map<String, dynamic>?;
+    final online = deviceOnline(device);
+
+    Widget statusLine;
+    if (device == null) {
+      statusLine = Row(children: [
+        Container(
+            width: 7,
+            height: 7,
+            decoration: const BoxDecoration(
+                color: Color(0xFF9AA8A2), shape: BoxShape.circle)),
+        const SizedBox(width: 6),
+        const Text('Интизори пайвастшавӣ',
+            style: TextStyle(fontSize: 12.5, color: Color(0xFF61726B))),
+      ]);
+    } else {
+      statusLine = Row(children: [
+        Container(
+            width: 8,
+            height: 8,
             decoration: BoxDecoration(
-              gradient: LinearGradient(
-                  colors: [color.withOpacity(0.85), color],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight),
-              borderRadius: BorderRadius.circular(16),
+                color: online ? const Color(0xFF1F9D55) : const Color(0xFF9AA8A2),
+                shape: BoxShape.circle)),
+        const SizedBox(width: 6),
+        Text(
+            online
+                ? 'Онлайн · ${device['battery'] ?? '—'}%'
+                : 'Офлайн · ${agoText(device['last_seen'] as String?)}',
+            style: const TextStyle(fontSize: 12.5, color: Color(0xFF61726B))),
+      ]);
+    }
+
+    return GestureDetector(
+      onTap: device == null
+          ? null
+          : () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                  builder: (_) =>
+                      ChildDetailScreen(child: c, color: color))),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withOpacity(0.05),
+                blurRadius: 16,
+                offset: const Offset(0, 6))
+          ],
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 52,
+              height: 52,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                    colors: [color.withOpacity(0.85), color],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              alignment: Alignment.center,
+              child: Text(
+                  name.isEmpty ? '?' : name.characters.first.toUpperCase(),
+                  style: GoogleFonts.manrope(
+                      color: Colors.white,
+                      fontSize: 22,
+                      fontWeight: FontWeight.w700)),
             ),
-            alignment: Alignment.center,
-            child: Text(name.isEmpty ? '?' : name.characters.first.toUpperCase(),
-                style: GoogleFonts.manrope(
-                    color: Colors.white,
-                    fontSize: 22,
-                    fontWeight: FontWeight.w700)),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(name,
-                    style: GoogleFonts.manrope(
-                        fontSize: 17, fontWeight: FontWeight.w700)),
-                const SizedBox(height: 3),
-                Row(
-                  children: [
-                    Container(
-                        width: 7,
-                        height: 7,
-                        decoration: const BoxDecoration(
-                            color: Color(0xFF9AA8A2),
-                            shape: BoxShape.circle)),
-                    const SizedBox(width: 6),
-                    const Text('Интизори пайвастшавӣ',
-                        style:
-                            TextStyle(fontSize: 12.5, color: Color(0xFF61726B))),
-                  ],
-                ),
-              ],
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(name,
+                      style: GoogleFonts.manrope(
+                          fontSize: 17, fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 3),
+                  statusLine,
+                ],
+              ),
             ),
-          ),
-          FilledButton.tonal(
-            onPressed: () => _pair(c['id'] as String, name),
-            style: FilledButton.styleFrom(
-                backgroundColor: const Color(0xFFEAF4EF),
-                foregroundColor: brandDark,
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14))),
-            child: const Text('Рамз',
-                style: TextStyle(fontWeight: FontWeight.w700)),
-          ),
-        ],
+            if (device == null)
+              FilledButton.tonal(
+                onPressed: () => createAndShowCode(
+                    context, c['id'] as String, name),
+                style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFFEAF4EF),
+                    foregroundColor: brandDark,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14))),
+                child: const Text('Рамз',
+                    style: TextStyle(fontWeight: FontWeight.w700)),
+              )
+            else
+              const Icon(Icons.chevron_right_rounded,
+                  color: Color(0xFF9AA8A2)),
+          ],
+        ),
       ),
     );
   }
@@ -650,8 +665,8 @@ class _HomeScreenState extends State<HomeScreen> {
         backgroundColor: brand,
         foregroundColor: Colors.white,
         icon: const Icon(Icons.add_rounded),
-        label: const Text('Кӯдак',
-            style: TextStyle(fontWeight: FontWeight.w700)),
+        label:
+            const Text('Кӯдак', style: TextStyle(fontWeight: FontWeight.w700)),
       ),
       body: Column(
         children: [
@@ -666,13 +681,12 @@ class _HomeScreenState extends State<HomeScreen> {
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                Text(_error!,
-                                    textAlign: TextAlign.center),
+                                Text(_error!, textAlign: TextAlign.center),
                                 const SizedBox(height: 12),
                                 FilledButton(
                                     style: FilledButton.styleFrom(
                                         backgroundColor: brand),
-                                    onPressed: _load,
+                                    onPressed: () => _load(),
                                     child: const Text('Аз нав')),
                               ],
                             )))
@@ -685,16 +699,388 @@ class _HomeScreenState extends State<HomeScreen> {
                               padding:
                                   const EdgeInsets.fromLTRB(16, 16, 16, 90),
                               itemCount: _children.length,
-                              itemBuilder: (ctx, i) => _childCard(
-                                      _children[i], i)
-                                  .animate()
-                                  .fadeIn(
-                                      duration: 350.ms, delay: (i * 60).ms)
-                                  .slideX(begin: 0.08),
+                              itemBuilder: (ctx, i) =>
+                                  _childCard(_children[i], i)
+                                      .animate()
+                                      .fadeIn(
+                                          duration: 350.ms,
+                                          delay: (i * 60).ms)
+                                      .slideX(begin: 0.08),
                             ),
                           ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// Сохтани рамз ва нишон додани он (аз ҳар ҷо)
+Future<void> createAndShowCode(
+    BuildContext context, String childId, String childName) async {
+  try {
+    final code = await supabase
+        .rpc('app_create_pairing_code', params: {'p_child_id': childId});
+    if (!context.mounted) return;
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const BrandLogo(size: 58, glow: false),
+              const SizedBox(height: 14),
+              Text('Рамз барои $childName',
+                  style: GoogleFonts.manrope(
+                      fontSize: 16, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 16),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                decoration: BoxDecoration(
+                    color: const Color(0xFFEAF4EF),
+                    borderRadius: BorderRadius.circular(16)),
+                child: Text('$code',
+                    style: GoogleFonts.robotoMono(
+                        fontSize: 38,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 10,
+                        color: brandDark)),
+              ),
+              const SizedBox(height: 14),
+              const Text(
+                  'Дар телефони кӯдак, дар барномаи «Посбон Кӯдак» ин рамзро ворид кунед. Эътибор то 10 дақиқа.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 13, height: 1.4)),
+              const SizedBox(height: 18),
+              SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: FilledButton(
+                  style: FilledButton.styleFrom(
+                      backgroundColor: brand,
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14))),
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Хуб'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  } catch (e) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Хато ҳангоми сохтани рамз')));
+    }
+  }
+}
+
+// ── Экрани тафсилоти кӯдак (харита + ҳолат + огоҳиҳо) ──
+class ChildDetailScreen extends StatefulWidget {
+  final Map<String, dynamic> child;
+  final Color color;
+  const ChildDetailScreen(
+      {super.key, required this.child, required this.color});
+  @override
+  State<ChildDetailScreen> createState() => _ChildDetailScreenState();
+}
+
+class _ChildDetailScreenState extends State<ChildDetailScreen> {
+  Map<String, dynamic>? _device;
+  Map<String, dynamic>? _location;
+  List<Map<String, dynamic>> _events = [];
+  bool _loading = true;
+  Timer? _timer;
+  final _map = MapController();
+
+  String get childId => widget.child['id'] as String;
+  String get childName => widget.child['name'] as String;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+    _timer = Timer.periodic(const Duration(seconds: 15), (_) => _load());
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    try {
+      final dev = await supabase
+          .from('devices')
+          .select()
+          .eq('child_id', childId)
+          .order('created_at', ascending: false)
+          .limit(1)
+          .maybeSingle();
+      Map<String, dynamic>? loc;
+      if (dev != null) {
+        loc = await supabase
+            .from('locations')
+            .select()
+            .eq('device_id', dev['id'])
+            .order('recorded_at', ascending: false)
+            .limit(1)
+            .maybeSingle();
+      }
+      final events = List<Map<String, dynamic>>.from(await supabase
+          .from('events')
+          .select()
+          .eq('child_id', childId)
+          .order('created_at', ascending: false)
+          .limit(10));
+      if (!mounted) return;
+      setState(() {
+        _device = dev;
+        _location = loc;
+        _events = events;
+        _loading = false;
+      });
+      if (loc != null) {
+        final ll = LatLng(
+            (loc['lat'] as num).toDouble(), (loc['lng'] as num).toDouble());
+        try {
+          _map.move(ll, 15);
+        } catch (_) {}
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  IconData _eventIcon(String type) {
+    switch (type) {
+      case 'sos':
+        return Icons.warning_amber_rounded;
+      case 'zone':
+        return Icons.my_location_rounded;
+      default:
+        return Icons.info_outline_rounded;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final online = deviceOnline(_device);
+    final hasLoc = _location != null;
+    final ll = hasLoc
+        ? LatLng((_location!['lat'] as num).toDouble(),
+            (_location!['lng'] as num).toDouble())
+        : const LatLng(38.5598, 68.7870); // Душанбе — пешфарз
+
+    return Scaffold(
+      body: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 8, 16, 8),
+              child: Row(
+                children: [
+                  IconButton(
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(Icons.arrow_back_rounded)),
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                        gradient: LinearGradient(colors: [
+                          widget.color.withOpacity(0.85),
+                          widget.color
+                        ]),
+                        borderRadius: BorderRadius.circular(13)),
+                    alignment: Alignment.center,
+                    child: Text(childName.characters.first.toUpperCase(),
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700)),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(childName,
+                            style: GoogleFonts.manrope(
+                                fontSize: 18, fontWeight: FontWeight.w800)),
+                        Row(children: [
+                          Container(
+                              width: 8,
+                              height: 8,
+                              decoration: BoxDecoration(
+                                  color: online
+                                      ? const Color(0xFF1F9D55)
+                                      : const Color(0xFF9AA8A2),
+                                  shape: BoxShape.circle)),
+                          const SizedBox(width: 6),
+                          Text(
+                              online
+                                  ? 'Онлайн · ${_device?['battery'] ?? '—'}%'
+                                  : (_device == null
+                                      ? 'Пайваст нашуда'
+                                      : 'Офлайн · ${agoText(_device?['last_seen'] as String?)}'),
+                              style: const TextStyle(
+                                  fontSize: 12.5, color: Color(0xFF61726B))),
+                        ]),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                      onPressed: () =>
+                          createAndShowCode(context, childId, childName),
+                      icon: const Icon(Icons.qr_code_rounded, color: brand)),
+                ],
+              ),
+            ),
+            Expanded(
+              child: _loading
+                  ? const Center(
+                      child: CircularProgressIndicator(color: brand))
+                  : ListView(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(22),
+                          child: SizedBox(
+                            height: 300,
+                            child: Stack(
+                              children: [
+                                FlutterMap(
+                                  mapController: _map,
+                                  options: MapOptions(
+                                      initialCenter: ll, initialZoom: 15),
+                                  children: [
+                                    TileLayer(
+                                      urlTemplate:
+                                          'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                                      userAgentPackageName: 'com.posbon.parent',
+                                    ),
+                                    if (hasLoc)
+                                      MarkerLayer(markers: [
+                                        Marker(
+                                          point: ll,
+                                          width: 46,
+                                          height: 46,
+                                          child: const Icon(
+                                              Icons.location_on,
+                                              color: brand,
+                                              size: 46),
+                                        )
+                                      ]),
+                                  ],
+                                ),
+                                if (!hasLoc)
+                                  Container(
+                                    color: Colors.black.withOpacity(0.35),
+                                    alignment: Alignment.center,
+                                    child: const Padding(
+                                      padding: EdgeInsets.all(20),
+                                      child: Text(
+                                          'Ҷой ҳоло дастрас нест.\nДар телефони кӯдак иҷозати ҷойро санҷед.',
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.w600)),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        if (hasLoc)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 8, left: 4),
+                            child: Text(
+                                'Навсозии ҷой: ${agoText(_location?['recorded_at'] as String?)}',
+                                style: const TextStyle(
+                                    fontSize: 12, color: Color(0xFF61726B))),
+                          ),
+                        const SizedBox(height: 20),
+                        Text('Огоҳиҳо',
+                            style: GoogleFonts.manrope(
+                                fontSize: 17, fontWeight: FontWeight.w700)),
+                        const SizedBox(height: 10),
+                        if (_events.isEmpty)
+                          Container(
+                            padding: const EdgeInsets.all(18),
+                            decoration: BoxDecoration(
+                                color: Colors.white,
+                                borderRadius: BorderRadius.circular(18)),
+                            child: const Text('Ҳоло огоҳӣ нест',
+                                style: TextStyle(color: Color(0xFF61726B))),
+                          )
+                        else
+                          ..._events.map((e) {
+                            final high = e['severity'] == 'high';
+                            return Container(
+                              margin: const EdgeInsets.only(bottom: 10),
+                              padding: const EdgeInsets.all(14),
+                              decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(16),
+                                  border: high
+                                      ? Border.all(
+                                          color: const Color(0xFFF3C9C2))
+                                      : null),
+                              child: Row(
+                                children: [
+                                  Container(
+                                    width: 38,
+                                    height: 38,
+                                    decoration: BoxDecoration(
+                                        color: high
+                                            ? const Color(0xFFFBE6E3)
+                                            : const Color(0xFFEAF4EF),
+                                        borderRadius:
+                                            BorderRadius.circular(12)),
+                                    child: Icon(
+                                        _eventIcon(e['type'] as String),
+                                        color: high ? danger : brand,
+                                        size: 20),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                            (e['title'] ?? e['type']) as String,
+                                            style: const TextStyle(
+                                                fontWeight: FontWeight.w700,
+                                                fontSize: 14)),
+                                        if (e['detail'] != null)
+                                          Text(e['detail'] as String,
+                                              style: const TextStyle(
+                                                  fontSize: 12.5,
+                                                  color: Color(0xFF61726B))),
+                                      ],
+                                    ),
+                                  ),
+                                  Text(
+                                      agoText(e['created_at'] as String?),
+                                      style: const TextStyle(
+                                          fontSize: 11,
+                                          color: Color(0xFF8495A0))),
+                                ],
+                              ),
+                            );
+                          }),
+                      ],
+                    ),
+            ),
+          ],
+        ),
       ),
     );
   }
